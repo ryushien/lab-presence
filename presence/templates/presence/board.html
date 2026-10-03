@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在室状況</title>
+<style>
+  :root {
+    --board: #8d9196;
+    --paper: #fbfaf7;
+    --ink: #24272b;
+    --ink-soft: #6b7076;
+    --line: #c9ccd0;
+    --head: #eef0f2;
+    --in: #1f8a4c;
+    --campus: #c47a12;
+    --home: #9aa0a6;
+    --error: #b3261e;
+    /* 学年ごとのマグネットの色（今のボードに合わせる） */
+    --g-staff: #3a78c9;
+    --g-m2: #3a78c9;
+    --g-m1: #8fb9ad;
+    --g-b4: #e3b8c8;
+    --g-b3: #eedc8f;
+    --g-other: #b9bec4;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--board);
+    color: var(--ink);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", "Meiryo", sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 14px 18px 18px;
+    gap: 12px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    background: var(--paper);
+    border-radius: 6px;
+    padding: 10px 18px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  }
+  h1 { font-size: 26px; margin: 0; letter-spacing: .08em; white-space: nowrap; }
+  .counts { display: flex; gap: 14px; font-size: 18px; white-space: nowrap; }
+  .counts b { font-size: 26px; font-variant-numeric: tabular-nums; margin-left: 4px; }
+  .counts .in b { color: var(--in); }
+  .counts .campus b { color: var(--campus); }
+  .activity {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 18px;
+    overflow: hidden;
+    font-size: 15px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    mask-image: linear-gradient(to right, #000 85%, transparent);
+  }
+  .activity span b { color: var(--ink); font-weight: 600; }
+  .activity .t { font-variant-numeric: tabular-nums; margin-right: 6px; }
+  .clock { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .clock small { display: block; font-size: 13px; font-weight: 400; color: var(--ink-soft); text-align: right; }
+
+  .banner {
+    display: none;
+    background: var(--error);
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 16px;
+  }
+  .banner.show { display: block; }
+
+  main {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 3), 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    box-shadow: 0 1px 2px rgba(0,0,0,.18);
+    table-layout: fixed;
+  }
+  th, td { border: 1px solid var(--line); text-align: center; }
+  th {
+    background: var(--head);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink-soft);
+    padding: 6px 0;
+  }
+  td { height: var(--row-h, 52px); font-size: 20px; }
+  td.grade { font-size: 16px; color: var(--ink-soft); width: 15%; }
+  td.name { width: 31%; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; }
+  td.slot { width: 18%; }
+  tr.in td.name { color: var(--in); }
+
+  .dot {
+    display: inline-block;
+    width: calc(var(--row-h, 52px) * .62);
+    height: calc(var(--row-h, 52px) * .62);
+    border-radius: 50%;
+    background: var(--dot, var(--g-other));
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.25);
+    vertical-align: middle;
+  }
+  tr.just-changed td { animation: flash 2.4s ease-out; }
+  @keyframes flash { from { background: #fff3c4; } to { background: transparent; } }
+
+  .empty { color: var(--paper); font-size: 20px; padding: 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>在室状況</h1>
+  <div class="counts">
+    <span class="in">在室<b id="count-in">–</b></span>
+    <span class="campus">学内<b id="count-campus">–</b></span>
+  </div>
+  <div class="activity" id="activity"></div>
+  <div class="clock"><span id="clock">--:--</span><small id="date"></small></div>
+</header>
+<div class="banner" id="banner">サーバーに接続できません。表示が古い可能性があります（最終更新 <span id="last-ok">–</span>）</div>
+<main id="board"><div class="empty">読み込み中…</div></main>
+
+<script>
+const POLL_MS = 5000;
+const COLUMNS = ["in_lab", "on_campus", "home"];
+const GRADE_ORDER = ["教員", "D3", "D2", "D1", "M2", "M1", "B4", "B3"];
+const GRADE_COLOR = {
+  "教員": "--g-staff", "M2": "--g-m2", "M1": "--g-m1", "B4": "--g-b4", "B3": "--g-b3",
+};
+let lastStatus = new Map();
+
+function gradeRank(g) {
+  const i = GRADE_ORDER.indexOf(g);
+  return i === -1 ? GRADE_ORDER.length : i;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function renderBoard(members) {
+  const board = document.getElementById("board");
+  if (!members.length) {
+    board.innerHTML = '<div class="empty">メンバーが登録されていません（管理画面で追加してください）</div>';
+    return;
+  }
+  // 学年順（教員→M→B）、同じ学年内は管理画面の並び順のまま
+  const sorted = members
+    .map((m, i) => ({ ...m, _i: i }))
+    .sort((a, b) => gradeRank(a.grade) - gradeRank(b.grade) || a._i - b._i);
+
+  // 画面の高さに合わせて列数と行の高さを決める
+  const cols = sorted.length > 30 ? 3 : sorted.length > 12 ? 2 : 1;
+  const perCol = Math.ceil(sorted.length / cols);
+  const available = board.clientHeight - 36; // 見出し行の分
+  const rowH = Math.max(30, Math.min(64, Math.floor(available / perCol) - 1));
+  board.style.setProperty("--cols", cols);
+  board.style.setProperty("--row-h", rowH + "px");
+
+  let html = "";
+  for (let c = 0; c < cols; c++) {
+    const chunk = sorted.slice(c * perCol, (c + 1) * perCol);
+    html += "<table><thead><tr><th>学年</th><th>名前</th><th>在室</th><th>学内</th><th>学外・帰宅</th></tr></thead><tbody>";
+    for (const m of chunk) {
+      const prev = lastStatus.get(m.id);
+      const changed = prev !== undefined && prev !== m.status;
+      const color = `var(${GRADE_COLOR[m.grade] || "--g-other"})`;
+      const title = m.note ? ` title="${escapeHtml(m.note)}"` : "";
+      html += `<tr class="${m.status === "in_lab" ? "in" : ""}${changed ? " just-changed" : ""}"${title}>`;
+      html += `<td class="grade">${escapeHtml(m.grade || "")}</td><td class="name">${escapeHtml(m.display_name)}</td>`;
+      for (const col of COLUMNS) {
+        html += `<td class="slot">${m.status === col ? `<span class="dot" style="--dot:${color}"></span>` : ""}</td>`;
+      }
+      html += "</tr>";
+    }
+    html += "</tbody></table>";
+  }
+  board.innerHTML = html;
+
+  document.getElementById("count-in").textContent = members.filter(m => m.status === "in_lab").length;
+  document.getElementById("count-campus").textContent = members.filter(m => m.status === "on_campus").length;
+  lastStatus = new Map(members.map(m => [m.id, m.status]));
+}
+
+function renderActivity(items) {
+  const verb = { in_lab: "入室", home: "退室", on_campus: "学内" };
+  document.getElementById("activity").innerHTML = items.map(a =>
+    `<span><span class="t">${fmtTime(a.created_at)}</span><b>${escapeHtml(a.member_name)}</b> ${verb[a.status] || a.status_label}</span>`
+  ).join("");
+}
+
+async function refresh() {
+  try {
+    const [mRes, aRes] = await Promise.all([
+      fetch("/api/members", { credentials: "same-origin" }),
+      fetch("/api/activity?limit=6", { credentials: "same-origin" }),
+    ]);
+    if (mRes.status === 401) { location.href = "/admin/login/?next=/"; return; }
+    if (!mRes.ok || !aRes.ok) throw new Error("HTTP " + mRes.status);
+    renderBoard(await mRes.json());
+    renderActivity(await aRes.json());
+    document.getElementById("banner").classList.remove("show");
+    document.getElementById("last-ok").textContent = new Date().toLocaleTimeString("ja-JP");
+  } catch (e) {
+    document.getElementById("banner").classList.add("show");
+  }
+}
+
+function tick() {
+  const now = new Date();
+  document.getElementById("clock").textContent = now.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  document.getElementById("date").textContent = now.toLocaleDateString("ja-JP", { month: "long", day: "numeric", weekday: "short" });
+}
+
+tick();
+setInterval(tick, 1000);
+refresh();
+setInterval(refresh, POLL_MS);
+window.addEventListener("resize", () => lastStatus.size && refresh());
+</script>
+</body>
+</html>
